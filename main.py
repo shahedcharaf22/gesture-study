@@ -31,6 +31,7 @@ from gestures import (
     detect_pinch,
     update_palm_history,
     detect_swipe,
+    is_open_palm,
 )
 
 # =========================================================
@@ -387,11 +388,45 @@ while True:
             frame_width,
             frame_height,
         )
-        update_palm_history(
-            palm_history,
-            palm_point,
-            PALM_HISTORY_LENGTH,
+        
+        open_palm = is_open_palm(
+            hand
         )
+        
+        if (
+            open_palm
+            and not drawing_mode
+            and not note_typing
+        ):
+            update_palm_history(
+                palm_history,
+                palm_point,
+                PALM_HISTORY_LENGTH,
+            )
+
+            current_time = time.monotonic()
+
+            swipe_direction = detect_swipe(
+                palm_history
+            )
+
+            if swipe_direction is not None:
+
+                if (
+                    current_time - last_swipe_time
+                    >= SWIPE_COOLDOWN_SECONDS
+                ):
+                    print(
+                        "SWIPE",
+                        swipe_direction.upper(),
+                    )
+
+                    last_swipe_time = current_time
+
+                palm_history.clear()
+
+        else:
+            palm_history.clear()
         
         current_time = time.monotonic()
 

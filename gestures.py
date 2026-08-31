@@ -85,3 +85,36 @@ def detect_swipe(
         return "right"
 
     return "left"
+
+def is_open_palm(hand):
+    wrist = hand[0]
+
+    finger_pairs = (
+        (8, 6),    # index: tip, PIP
+        (12, 10),  # middle
+        (16, 14),  # ring
+        (20, 18),  # pinky
+    )
+
+    extended_fingers = 0
+
+    for tip_id, pip_id in finger_pairs:
+        fingertip = hand[tip_id]
+        pip_joint = hand[pip_id]
+
+        tip_distance = math.sqrt(
+            (fingertip.x - wrist.x) ** 2
+            + (fingertip.y - wrist.y) ** 2
+            + (fingertip.z - wrist.z) ** 2
+        )
+
+        pip_distance = math.sqrt(
+            (pip_joint.x - wrist.x) ** 2
+            + (pip_joint.y - wrist.y) ** 2
+            + (pip_joint.z - wrist.z) ** 2
+        )
+
+        if tip_distance > pip_distance * 1.15:
+            extended_fingers += 1
+
+    return extended_fingers == 4
