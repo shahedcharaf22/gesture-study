@@ -1,19 +1,33 @@
 import cv2
-import mediapipe as mp
 import time
 import math
-import textwrap
 import numpy as np
 
+from sticky_notes import (
+        NOTE_WIDTH,
+        NOTE_HEIGHT,
+        NOTE_COLORS,
+        draw_sticky_note,
+        find_note_at_position,
+)
+
+from hand_tracker import (
+     create_hand_landmarker,
+     detect_hand,
+)
+
+from drawing import (
+    create_canvases,
+    clear_canvases,
+    draw_stroke,
+    apply_highlighter,
+)
 
 # =========================================================
 # SETTINGS
 # =========================================================
 
 WINDOW_NAME = "Gesture Study Workspace"
-
-NOTE_WIDTH = 320
-NOTE_HEIGHT = 170
 
 SMOOTHING_ALPHA = 0.45
 SAFE_MARGIN_RATIO = 0.08
@@ -23,19 +37,6 @@ DETECTION_HEIGHT = 360
 
 # Number of missing-hand frames before resetting pinch state
 PINCH_RESET_FRAMES = 8
-
-# =========================================================
-# STICKY NOTE COLORS
-# OpenCV uses BGR instead of RGB
-# =========================================================
-
-NOTE_COLORS = {
-    "yellow": (100, 230, 255),
-    "pink": (220, 190, 255),
-    "blue": (255, 220, 170),
-    "green": (190, 255, 190),
-}
-
 
 # =========================================================
 # PROGRAM STATE
@@ -97,152 +98,6 @@ drag_offset_y = 0
 frame_width = 0
 frame_height = 0
 
-
-# =========================================================
-# DRAW A STICKY NOTE
-# =========================================================
-
-def draw_sticky_note(
-    image,
-    note,
-    selected=False,
-):
-    x = note["x"]
-    y = note["y"]
-
-    text = note["text"]
-    color = note["color"]
-
-    pinned = note.get("pinned", False)
-
-    height, width = image.shape[:2]
-
-    # Keep note inside the screen
-    x = max(
-        0,
-        min(
-            x,
-            width - NOTE_WIDTH,
-        ),
-    )
-
-    y = max(
-        0,
-        min(
-            y,
-            height - NOTE_HEIGHT,
-        ),
-    )
-
-    note["x"] = x
-    note["y"] = y
-
-    # Sticky note background
-    cv2.rectangle(
-        image,
-        (x, y),
-        (
-            x + NOTE_WIDTH,
-            y + NOTE_HEIGHT,
-        ),
-        color,
-        -1,
-    )
-
-    # Selected notes get a thicker border
-    if selected:
-        border_color = (0, 140, 255)
-        border_thickness = 4
-
-    else:
-        border_color = (60, 60, 60)
-        border_thickness = 2
-
-    cv2.rectangle(
-        image,
-        (x, y),
-        (
-            x + NOTE_WIDTH,
-            y + NOTE_HEIGHT,
-        ),
-        border_color,
-        border_thickness,
-    )
-
-    # Show whether note is pinned
-    if pinned:
-        status = "[PINNED]"
-
-    else:
-        status = "[UNPINNED]"
-
-    cv2.putText(
-        image,
-        status,
-        (x + 10, y + 25),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (50, 50, 50),
-        1,
-        cv2.LINE_AA,
-    )
-
-    # Wrap long text
-    lines = textwrap.wrap(
-        text,
-        width=34,
-    )
-
-    for line_number, line in enumerate(lines[:5]):
-        cv2.putText(
-            image,
-            line,
-            (
-                x + 12,
-                y + 55 + line_number * 24,
-            ),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.58,
-            (0, 0, 0),
-            1,
-            cv2.LINE_AA,
-        )
-
-
-# =========================================================
-# FIND WHICH NOTE WAS CLICKED
-# =========================================================
-
-def find_note_at_position(mouse_x, mouse_y):
-    # Go backwards so the top-most note is selected first
-    for index in range(
-        len(sticky_notes) - 1,
-        -1,
-        -1,
-    ):
-        note = sticky_notes[index]
-
-        x = note["x"]
-        y = note["y"]
-
-        inside_x = (
-            x
-            <= mouse_x
-            <= x + NOTE_WIDTH
-        )
-
-        inside_y = (
-            y
-            <= mouse_y
-            <= y + NOTE_HEIGHT
-        )
-
-        if inside_x and inside_y:
-            return index
-
-    return None
-
-
 # =========================================================
 # MOUSE / TRACKPAD CALLBACK
 # =========================================================
@@ -277,6 +132,7 @@ def mouse_callback(
 
     if event == cv2.EVENT_LBUTTONDBLCLK:
         note_index = find_note_at_position(
+            sticky_notes,
             x,
             y,
         )
@@ -320,6 +176,7 @@ def mouse_callback(
 
     elif event == cv2.EVENT_LBUTTONDOWN:
         note_index = find_note_at_position(
+            sticky_notes,
             x,
             y,
         )
@@ -424,23 +281,7 @@ def mouse_callback(
 # MEDIAPIPE SETUP
 # =========================================================
 
-base_options = mp.tasks.BaseOptions(
-    model_asset_path="hand_landmarker.task",
-    delegate=mp.tasks.BaseOptions.Delegate.CPU,
-)
-
-options = mp.tasks.vision.HandLandmarkerOptions(
-    base_options=base_options,
-    running_mode=mp.tasks.vision.RunningMode.VIDEO,
-    num_hands=1,
-)
-
-landmarker = (
-    mp.tasks.vision.HandLandmarker.create_from_options(
-        options
-    )
-)
-
+landmarker = create_hand_landmarker()
 
 # =========================================================
 # CAMERA SETUP
@@ -515,102 +356,42 @@ while True:
     # =====================================================
     # CREATE DRAWING CANVASES
     # =====================================================
-
-    if canvas is None:
-        canvas = np.zeros_like(
-            frame
+    if (
+        canvas is None
+        or highlighter_canvas is None
+    ):
+        canvas, highlighter_canvas = (
+            create_canvases(frame)
         )
-
-    if highlighter_canvas is None:
-        highlighter_canvas = (
-            np.zeros_like(frame)
-        )
-
-
+        
     # =====================================================
-    # SMALLER FRAME FOR MEDIAPIPE
+    # DETECT HAND
     # =====================================================
 
-    detection_frame = cv2.resize(
+    hand_data = detect_hand(
+        landmarker,
         frame,
-        (
-            DETECTION_WIDTH,
-            DETECTION_HEIGHT,
-        ),
-    )
-
-    rgb_frame = cv2.cvtColor(
-        detection_frame,
-        cv2.COLOR_BGR2RGB,
-    )
-
-    mp_image = mp.Image(
-        image_format=mp.ImageFormat.SRGB,
-        data=rgb_frame,
-    )
-
-
-    timestamp_ms = int(
-        time.monotonic() * 1000
-    )
-
-
-    result = (
-        landmarker.detect_for_video(
-            mp_image,
-            timestamp_ms,
-        )
+        DETECTION_WIDTH,
+        DETECTION_HEIGHT,
     )
 
     cursor_point = None
-
+    
     # =====================================================
     # HAND DETECTED
     # =====================================================
 
-    if result.hand_landmarks:
+    if hand_data is not None:
+        
         hand_missing_frames = 0
-        
-        hand = (
-            result.hand_landmarks[0]
+
+        hand, thumb_point, index_point, connections = (
+            hand_data
         )
 
-        connections = (
-            mp.tasks.vision
-            .HandLandmarksConnections
-            .HAND_CONNECTIONS
-        )
-
-
-        # Fingertips
-        thumb_tip = hand[4]
-        index_tip = hand[8]
-
-
-        # =================================================
-        # CONVERT NORMALIZED COORDINATES TO PIXELS
-        # =================================================
-
-        thumb_x = int(
-            thumb_tip.x
-            * frame_width
-        )
-
-        thumb_y = int(
-            thumb_tip.y
-            * frame_height
-        )
-
-        index_x = int(
-            index_tip.x
-            * frame_width
-        )
-
-        index_y = int(
-            index_tip.y
-            * frame_height
-        )
-        
+        thumb_x, thumb_y = thumb_point
+        index_x, index_y = index_point
+          
         # =================================================
         # SMOOTH CURSOR POSITION
         # =================================================
@@ -643,20 +424,20 @@ while True:
                 * smoothed_y
             )
             
-            cursor_point = (
-                smoothed_x,
-                smoothed_y,
-            )
-            
-            inside_safe_zone = (
-                safe_left
-                <= cursor_point[0]
-                <= safe_right
-                and
-                safe_top
-                <= cursor_point[1]
-                <= safe_bottom
-            )
+        cursor_point = (
+            smoothed_x,
+            smoothed_y,
+        )
+        
+        inside_safe_zone = (
+            safe_left
+            <= cursor_point[0]
+            <= safe_right
+            and
+            safe_top
+            <= cursor_point[1]
+            <= safe_bottom
+        )
 
         # =================================================
         # PINCH DISTANCE
@@ -700,57 +481,16 @@ while True:
             )
 
             if (
-                previous_point
-                is not None
+                previous_point is not None
             ):
-
-                # PEN
-                if tool == "pen":
-                    cv2.line(
-                        canvas,
-                        previous_point,
-                        current_point,
-                        (0, 0, 255),
-                        5,
-                        cv2.LINE_AA,
-                    )
-
-
-                # HIGHLIGHTER
-                elif (
-                    tool
-                    == "highlighter"
-                ):
-                    cv2.line(
-                        highlighter_canvas,
-                        previous_point,
-                        current_point,
-                        (0, 255, 255),
-                        26,
-                        cv2.LINE_AA,
-                    )
-
-
-                # ERASER
-                elif tool == "eraser":
-                    cv2.line(
-                        canvas,
-                        previous_point,
-                        current_point,
-                        (0, 0, 0),
-                        40,
-                        cv2.LINE_AA,
-                    )
-
-                    cv2.line(
-                        highlighter_canvas,
-                        previous_point,
-                        current_point,
-                        (0, 0, 0),
-                        40,
-                        cv2.LINE_AA,
-                    )
-
+            
+                draw_stroke(
+                    canvas,
+                    highlighter_canvas,
+                    previous_point,
+                    current_point,
+                    tool,
+                )
 
             previous_point = (
                 current_point
@@ -953,40 +693,11 @@ while True:
         frame,
         canvas,
     )
-
-
-    # =====================================================
-    # TRANSPARENT HIGHLIGHTER
-    # =====================================================
-
-    highlight_mask = np.any(
-        highlighter_canvas != 0,
-        axis=2,
+    
+    display_frame = apply_highlighter(
+        display_frame,
+        highlighter_canvas,
     )
-
-    if np.any(
-        highlight_mask
-    ):
-        highlight_overlay = (
-            display_frame.copy()
-        )
-
-        highlight_overlay[
-            highlight_mask
-        ] = highlighter_canvas[
-            highlight_mask
-        ]
-
-        display_frame = (
-            cv2.addWeighted(
-                highlight_overlay,
-                0.35,
-                display_frame,
-                0.65,
-                0,
-            )
-        )
-
 
     # =====================================================
     # DRAW STICKY NOTES
@@ -1240,15 +951,10 @@ while True:
         )
 
 
-    # Clear drawings
     elif key == ord("c"):
 
-        canvas = np.zeros_like(
-            frame
-        )
-
-        highlighter_canvas = (
-            np.zeros_like(frame)
+        canvas, highlighter_canvas = (
+            clear_canvases(frame)
         )
 
         previous_point = None
@@ -1256,7 +962,6 @@ while True:
         print(
             "Drawings cleared"
         )
-
 
     # Show/hide skeleton
     elif key == ord("s"):
