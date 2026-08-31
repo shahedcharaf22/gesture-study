@@ -76,6 +76,15 @@ cursor_point = None
 palm_history = []
 last_swipe_time = 0.0
 
+
+pages = [
+    "PAGE 1",
+    "PAGE 2",
+    "PAGE 3",
+]
+
+current_page_index = 0
+
 # Count how long MediaPipe has not seen the hand
 hand_missing_frames = 0
 
@@ -393,6 +402,10 @@ while True:
             hand
         )
         
+        # =================================================
+        # SWIPE DETECTION
+        # =================================================
+
         if (
             open_palm
             and not drawing_mode
@@ -421,34 +434,31 @@ while True:
                         swipe_direction.upper(),
                     )
 
+                    if swipe_direction == "left":
+                        current_page_index = min(
+                            current_page_index + 1,
+                            len(pages) - 1,
+                        )
+
+                    elif swipe_direction == "right":
+                        current_page_index = max(
+                            current_page_index - 1,
+                            0,
+                        )
+
+                    print(
+                        "CURRENT PAGE:",
+                        current_page_index + 1,
+                    )
+
                     last_swipe_time = current_time
 
                 palm_history.clear()
 
         else:
             palm_history.clear()
+     
         
-        current_time = time.monotonic()
-
-        swipe_direction = detect_swipe(
-            palm_history
-        )
-
-        if swipe_direction is not None:
-
-            if (
-                current_time - last_swipe_time
-                >= SWIPE_COOLDOWN_SECONDS
-            ):
-                print(
-                    "SWIPE",
-                    swipe_direction.upper(),
-                )
-
-                last_swipe_time = current_time
-
-            palm_history.clear()
-                
         # =================================================
         # SMOOTH CURSOR POSITION
         # =================================================
@@ -634,6 +644,28 @@ while True:
     display_frame = apply_highlighter(
         display_frame,
         highlighter_canvas,
+    )
+    
+    # =====================================================
+    # CURRENT PAGE
+    # =====================================================
+
+    page_text = pages[
+        current_page_index
+    ]
+
+    cv2.putText(
+        display_frame,
+        page_text,
+        (
+            frame_width - 180,
+            45,
+        ),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
     )
 
     # =====================================================
