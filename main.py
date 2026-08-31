@@ -20,6 +20,13 @@ SMOOTHING_ALPHA = 0.45
 DETECTION_WIDTH = 640
 DETECTION_HEIGHT = 360
 
+# Optical-flow fallback settings
+TRACKING_RADIUS = 35
+MAX_TRACK_POINTS = 15
+MIN_TRACK_POINTS = 3
+MAX_FALLBACK_JUMP = 80
+MAX_FALLBACK_FRAMES = 30
+PINCH_RESET_FRAMES = 8
 
 # =========================================================
 # STICKY NOTE COLORS
@@ -40,6 +47,7 @@ NOTE_COLORS = {
 
 pinching = False
 drawing_mode = False
+pinch_armed = True
 
 canvas = None
 highlighter_canvas = None
@@ -57,6 +65,14 @@ smoothed_y = None
 
 cursor_point = None
 
+# Optical flow fallback tracking
+previous_gray = None
+tracked_points = None
+
+fallback_x = None
+fallback_y = None
+
+fallback_frames = 0
 
 # =========================================================
 # STICKY NOTE STATE
@@ -484,6 +500,12 @@ while True:
         frame,
         1,
     )
+    
+    # Convert to grayscale for optical flow tracking
+    gray_frame = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2GRAY,
+    )
 
     frame_height, frame_width = (
         frame.shape[:2]
@@ -588,8 +610,7 @@ while True:
             index_tip.y
             * frame_height
         )
-
-
+        
         # =================================================
         # SMOOTH CURSOR POSITION
         # =================================================
@@ -627,6 +648,71 @@ while True:
             smoothed_x,
             smoothed_y,
         )
+        
+        # Reset fallback position using MediaPipe's reliable position
+        fallback_x = float(smoothed_x)
+        fallback_y = float(smoothed_y)
+        fallback_frames = 0
+
+
+        # Create a small region around the index fingertip
+        x1 = max(0, index_x - TRACKING_RADIUS)
+        y1 = max(0, index_y - TRACKING_RADIUS)
+
+        x2 = min(
+            frame_width,
+            index_x + TRACKING_RADIUS,
+        )
+
+        y2 = min(
+            frame_height,
+            index_y + TRACKING_RADIUS,
+        )
+
+
+        if x2 > x1 and y2 > y1:
+            fingertip_region = gray_frame[
+                y1:y2,
+                x1:x2,
+            ]
+
+            # Only search very close to the fingertip
+            region_mask = np.zeros_like(
+                fingertip_region
+            )
+
+            fingertip_center = (
+                index_x - x1,
+                index_y - y1,
+            )
+
+            cv2.circle(
+                region_mask,
+                fingertip_center,
+                25,
+                255,
+                -1,
+            )
+
+            features = cv2.goodFeaturesToTrack(
+                fingertip_region,
+                maxCorners=MAX_TRACK_POINTS,
+                qualityLevel=0.01,
+                minDistance=4,
+                mask=region_mask,
+                blockSize=7,
+            )
+
+            if features is not None:
+                features[:, 0, 0] += x1
+                features[:, 0, 1] += y1
+
+                tracked_points = features.astype(
+                    np.float32
+                )
+
+            else:
+                tracked_points = None
 
 
         # =================================================
@@ -638,38 +724,23 @@ while True:
             index_y - thumb_y,
         )
 
+        # Fingers are clearly separated
+        if distance > 65:
+           pinching = False
+           pinch_armed = True
 
         # New pinch
-        if (
-            distance < 40
-            and not pinching
-        ):
+        elif distance < 40 and pinch_armed:
             pinching = True
+            pinch_armed = False
 
-            drawing_mode = (
-                not drawing_mode
-            )
-
+            drawing_mode = not drawing_mode
             previous_point = None
 
             if drawing_mode:
-                print(
-                    "Drawing mode ON"
-                )
-
+               print("Drawing mode ON")
             else:
-                print(
-                    "Drawing mode OFF"
-                )
-
-
-        # Pinch released
-        elif (
-            distance > 65
-            and pinching
-        ):
-            pinching = False
-
+               print("Drawing mode OFF")
 
         # =================================================
         # DRAWING
@@ -864,18 +935,162 @@ while True:
             )
 
 
-    # =====================================================
+    # ========================s=============================
     # NO HAND
     # =====================================================
 
     else:
-        pinching = False
-
         previous_point = None
 
-        smoothed_x = None
-        smoothed_y = None
+        fallback_frames += 1
 
+        if fallback_frames >= PINCH_RESET_FRAMES:
+            pinching = False
+            pinch_armed = False
+
+        if (
+            drawing_mode
+            and previous_gray is not None
+            and tracked_points is not None
+            and fallback_x is not None
+            and fallback_y is not None
+            and fallback_frames <= MAX_FALLBACK_FRAMES
+        ):
+            next_points, status, error = cv2.calcOpticalFlowPyrLK(
+                previous_gray,
+                gray_frame,
+                tracked_points,
+                None,
+            )
+
+            if next_points is not None and status is not None:
+
+                # Track the new points backward
+                back_points, back_status, back_error = cv2.calcOpticalFlowPyrLK(
+                    gray_frame,
+                    previous_gray,
+                    next_points,
+                    None,
+                )
+
+                if back_points is not None and back_status is not None:
+
+                    forward_ok = status.flatten() == 1
+                    backward_ok = back_status.flatten() == 1
+
+                    # Check how close each point returns
+                    # to its original position
+                    round_trip_error = np.linalg.norm(
+                        tracked_points.reshape(-1, 2)
+                        - back_points.reshape(-1, 2),
+                        axis=1,
+                    )
+
+                    good_mask = (
+                        forward_ok
+                        & backward_ok
+                        & (round_trip_error < 3.0)
+                    )
+
+                    # Keep only reliable points
+                    old_points = tracked_points[
+                        good_mask
+                    ].reshape(-1, 2)
+
+                    new_points = next_points[
+                        good_mask
+                    ].reshape(-1, 2)
+
+                    if len(new_points) >= MIN_TRACK_POINTS:
+
+                        movements = new_points - old_points
+
+                        dx = float(
+                            np.median(
+                                movements[:, 0]
+                            )
+                        )
+
+                        dy = float(
+                            np.median(
+                                movements[:, 1]
+                            )
+                        )
+
+                        movement_distance = math.hypot(
+                            dx,
+                            dy,
+                        )
+
+                        # Reject unrealistic jumps
+                        if movement_distance <= MAX_FALLBACK_JUMP:
+
+                            fallback_x += dx
+                            fallback_y += dy
+
+                            # Smooth fallback position
+                            smoothed_x = int(
+                                SMOOTHING_ALPHA * fallback_x
+                                + (1 - SMOOTHING_ALPHA) * smoothed_x
+                            )
+
+                            smoothed_y = int(
+                                SMOOTHING_ALPHA * fallback_y
+                                + (1 - SMOOTHING_ALPHA) * smoothed_y
+                            )
+
+                            cursor_point = (
+                                smoothed_x,
+                                smoothed_y,
+                            )
+
+                            # Keep reliable tracking points
+                            # for the next frame
+                            tracked_points = (
+                                new_points
+                                .reshape(-1, 1, 2)
+                                .astype(np.float32)
+                            )
+
+                            # Small dots = reliable tracked features
+                            for point in new_points:
+                                point_x, point_y = point
+
+                                cv2.circle(
+                                    frame,
+                                    (
+                                        int(point_x),
+                                        int(point_y),
+                                    ),
+                                    3,
+                                    (255, 255, 0),
+                                    -1,
+                                )
+
+                            # Purple circle = estimated fingertip
+                            cv2.circle(
+                                frame,
+                                cursor_point,
+                                15,
+                                (255, 0, 255),
+                                3,
+                            )
+
+                        else:
+                            tracked_points = None
+
+                    else:
+                        tracked_points = None
+
+                else:
+                    tracked_points = None
+
+            else:
+                tracked_points = None
+
+        else:
+            if fallback_frames > MAX_FALLBACK_FRAMES:
+                tracked_points = None
 
     # =====================================================
     # STATUS TEXT
@@ -1041,7 +1256,11 @@ while True:
     # =====================================================
     # SHOW WINDOW
     # =====================================================
-
+    
+    # Save current grayscale frame
+    # so next loop can compare against it
+    previous_gray = gray_frame.copy()
+    
     cv2.imshow(
         WINDOW_NAME,
         display_frame,
