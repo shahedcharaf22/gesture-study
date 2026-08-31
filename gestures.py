@@ -37,3 +37,51 @@ def detect_pinch(
         pinch_armed,
         new_pinch,
     )
+
+def update_palm_history(
+    palm_history,
+    palm_point,
+    max_length,
+):
+    palm_history.append(
+        palm_point
+    )
+
+    if len(palm_history) > max_length:
+        palm_history.pop(0)
+
+def detect_swipe(
+    palm_history,
+    minimum_horizontal_distance=180,
+    maximum_vertical_distance=100,
+):
+    if len(palm_history) < 2:
+        return None
+
+    start_x, start_y = palm_history[0]
+    end_x, end_y = palm_history[-1]
+
+    horizontal_distance = (
+        end_x - start_x
+    )
+
+    vertical_distance = abs(
+        end_y - start_y
+    )
+
+    if (
+        abs(horizontal_distance)
+        < minimum_horizontal_distance
+    ):
+        return None
+
+    if (
+        vertical_distance
+        > maximum_vertical_distance
+    ):
+        return None
+
+    if horizontal_distance > 0:
+        return "right"
+
+    return "left"

@@ -14,6 +14,7 @@ from hand_tracker import (
     detect_hand,
     draw_hand_skeleton,
     smooth_cursor,
+    get_palm_center,
 )
 
 from drawing import (
@@ -28,6 +29,8 @@ from drawing import (
 
 from gestures import (
     detect_pinch,
+    update_palm_history,
+    detect_swipe,
 )
 
 # =========================================================
@@ -41,6 +44,8 @@ SAFE_MARGIN_RATIO = 0.08
 
 DETECTION_WIDTH = 640
 DETECTION_HEIGHT = 360
+PALM_HISTORY_LENGTH = 8
+SWIPE_COOLDOWN_SECONDS = 0.7
 
 # Number of missing-hand frames before resetting pinch state
 PINCH_RESET_FRAMES = 8
@@ -67,6 +72,8 @@ show_safe_frame = True
 smoothed_point = None
 
 cursor_point = None
+palm_history = []
+last_swipe_time = 0.0
 
 # Count how long MediaPipe has not seen the hand
 hand_missing_frames = 0
@@ -374,7 +381,39 @@ while True:
         hand, thumb_point, index_point, connections = (
             hand_data
         )
+        
+        palm_point = get_palm_center(
+            hand,
+            frame_width,
+            frame_height,
+        )
+        update_palm_history(
+            palm_history,
+            palm_point,
+            PALM_HISTORY_LENGTH,
+        )
+        
+        current_time = time.monotonic()
 
+        swipe_direction = detect_swipe(
+            palm_history
+        )
+
+        if swipe_direction is not None:
+
+            if (
+                current_time - last_swipe_time
+                >= SWIPE_COOLDOWN_SECONDS
+            ):
+                print(
+                    "SWIPE",
+                    swipe_direction.upper(),
+                )
+
+                last_swipe_time = current_time
+
+            palm_history.clear()
+                
         # =================================================
         # SMOOTH CURSOR POSITION
         # =================================================
@@ -480,6 +519,7 @@ while True:
     # =====================================================
 
     else:
+        palm_history.clear()
         # Stop the current stroke so we do not draw
         # a giant line when the hand returns
         previous_point = None

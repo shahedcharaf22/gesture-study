@@ -208,3 +208,48 @@ def smooth_cursor(
         smoothed_x,
         smoothed_y,
     )
+
+def get_palm_center(
+    hand,
+    frame_width,
+    frame_height,
+):
+    palm_landmark_ids = (
+        0,
+        5,
+        9,
+        13,
+        17,
+    )
+
+    x_total = 0
+    y_total = 0
+
+    for landmark_id in palm_landmark_ids:
+        landmark = hand[
+            landmark_id
+        ]
+
+        x_total += landmark.x
+        y_total += landmark.y
+
+    palm_x = int(
+        (
+            x_total
+            / len(palm_landmark_ids)
+        )
+        * frame_width
+    )
+
+    palm_y = int(
+        (
+            y_total
+            / len(palm_landmark_ids)
+        )
+        * frame_height
+    )
+
+    return (
+        palm_x,
+        palm_y,
+    )
