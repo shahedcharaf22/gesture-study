@@ -92,3 +92,119 @@ def detect_hand(
         index_point,
         connections,
     )
+
+def draw_hand_skeleton(
+    frame,
+    hand,
+    connections,
+):
+    frame_height, frame_width = (
+        frame.shape[:2]
+    )
+
+    # Draw every landmark
+    for index, landmark in enumerate(hand):
+        x = int(
+            landmark.x * frame_width
+        )
+
+        y = int(
+            landmark.y * frame_height
+        )
+
+        cv2.circle(
+            frame,
+            (x, y),
+            5,
+            (0, 255, 0),
+            -1,
+        )
+
+        cv2.putText(
+            frame,
+            str(index),
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    # Draw lines between landmarks
+    for connection in connections:
+        start_landmark = hand[
+            connection.start
+        ]
+
+        end_landmark = hand[
+            connection.end
+        ]
+
+        x1 = int(
+            start_landmark.x
+            * frame_width
+        )
+
+        y1 = int(
+            start_landmark.y
+            * frame_height
+        )
+
+        x2 = int(
+            end_landmark.x
+            * frame_width
+        )
+
+        y2 = int(
+            end_landmark.y
+            * frame_height
+        )
+
+        cv2.line(
+            frame,
+            (x1, y1),
+            (x2, y2),
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+def smooth_cursor(
+    index_point,
+    previous_smoothed_point,
+    smoothing_alpha,
+):
+    index_x, index_y = index_point
+
+    if previous_smoothed_point is None:
+        return index_point
+
+    previous_x, previous_y = (
+        previous_smoothed_point
+    )
+
+    smoothed_x = int(
+        smoothing_alpha
+        * index_x
+        + (
+            1
+            - smoothing_alpha
+        )
+        * previous_x
+    )
+
+    smoothed_y = int(
+        smoothing_alpha
+        * index_y
+        + (
+            1
+            - smoothing_alpha
+        )
+        * previous_y
+    )
+
+    return (
+        smoothed_x,
+        smoothed_y,
+    )

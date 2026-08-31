@@ -12,6 +12,8 @@ from sticky_notes import (
 from hand_tracker import (
     create_hand_landmarker,
     detect_hand,
+    draw_hand_skeleton,
+    smooth_cursor,
 )
 
 from drawing import (
@@ -19,6 +21,9 @@ from drawing import (
     clear_canvases,
     draw_stroke,
     apply_highlighter,
+    draw_cursor,
+    calculate_safe_zone,
+    is_inside_safe_zone,
 )
 
 from gestures import (
@@ -59,8 +64,7 @@ show_skeleton = True
 show_safe_frame = True
 
 # Smooth cursor position
-smoothed_x = None
-smoothed_y = None
+smoothed_point = None
 
 cursor_point = None
 
@@ -330,20 +334,9 @@ while True:
         frame.shape[:2]
     )
 
-    safe_left = int(
-        frame_width * SAFE_MARGIN_RATIO
-    )
-
-    safe_right = int(
-        frame_width * (1 - SAFE_MARGIN_RATIO)
-    )
-
-    safe_top = int(
-        frame_height * SAFE_MARGIN_RATIO
-    )
-
-    safe_bottom = int(
-        frame_height * (1 - SAFE_MARGIN_RATIO)
+    safe_zone = calculate_safe_zone(
+        frame,
+        SAFE_MARGIN_RATIO,
     )
 
     # =====================================================
@@ -377,58 +370,33 @@ while True:
 
     if hand_data is not None:
         hand_missing_frames = 0
-
+        
         hand, thumb_point, index_point, connections = (
             hand_data
         )
-
-        index_x, index_y = index_point
 
         # =================================================
         # SMOOTH CURSOR POSITION
         # =================================================
 
-        if (
-            smoothed_x is None
-            or smoothed_y is None
-        ):
-            smoothed_x = index_x
-            smoothed_y = index_y
-
-        else:
-            smoothed_x = int(
-                SMOOTHING_ALPHA
-                * index_x
-                + (
-                    1
-                    - SMOOTHING_ALPHA
-                )
-                * smoothed_x
-            )
-
-            smoothed_y = int(
-                SMOOTHING_ALPHA
-                * index_y
-                + (
-                    1
-                    - SMOOTHING_ALPHA
-                )
-                * smoothed_y
-            )
-
-        cursor_point = (
-            smoothed_x,
-            smoothed_y,
+        smoothed_point = smooth_cursor(
+            index_point,
+            smoothed_point,
+            SMOOTHING_ALPHA,
         )
 
+        cursor_point = smoothed_point
+
+
+        # =================================================
+        # SAFE ZONE CHECK
+        # =================================================
+
         inside_safe_zone = (
-            safe_left
-            <= cursor_point[0]
-            <= safe_right
-            and
-            safe_top
-            <= cursor_point[1]
-            <= safe_bottom
+            is_inside_safe_zone(
+                cursor_point,
+                safe_zone,
+            )
         )
 
         # =================================================
@@ -491,113 +459,21 @@ while True:
         # =================================================
 
         if show_skeleton:
-            for index, landmark in enumerate(
-                hand
-            ):
-                x = int(
-                    landmark.x
-                    * frame_width
-                )
-
-                y = int(
-                    landmark.y
-                    * frame_height
-                )
-
-                cv2.circle(
-                    frame,
-                    (x, y),
-                    5,
-                    (0, 255, 0),
-                    -1,
-                )
-
-                cv2.putText(
-                    frame,
-                    str(index),
-                    (x, y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
-
-            for connection in connections:
-                start_landmark = hand[
-                    connection.start
-                ]
-
-                end_landmark = hand[
-                    connection.end
-                ]
-
-                x1 = int(
-                    start_landmark.x
-                    * frame_width
-                )
-
-                y1 = int(
-                    start_landmark.y
-                    * frame_height
-                )
-
-                x2 = int(
-                    end_landmark.x
-                    * frame_width
-                )
-
-                y2 = int(
-                    end_landmark.y
-                    * frame_height
-                )
-
-                cv2.line(
-                    frame,
-                    (x1, y1),
-                    (x2, y2),
-                    (255, 255, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
+            draw_hand_skeleton(
+                frame,
+                hand,
+                connections,
+         )
 
         # =================================================
         # CURSOR
         # =================================================
 
-        if cursor_point is not None:
-            if tool == "pen":
-                cursor_color = (
-                    0,
-                    0,
-                    255,
-                )
-
-            elif (
-                tool
-                == "highlighter"
-            ):
-                cursor_color = (
-                    0,
-                    255,
-                    255,
-                )
-
-            else:
-                cursor_color = (
-                    255,
-                    255,
-                    255,
-                )
-
-            cv2.circle(
-                frame,
-                cursor_point,
-                10,
-                cursor_color,
-                2,
-                cv2.LINE_AA,
-            )
+        draw_cursor(
+            frame,
+            cursor_point,
+            tool,
+        )
 
     # =====================================================
     # NO HAND
@@ -619,8 +495,7 @@ while True:
 
         # Reset smoothing so the returning cursor
         # starts directly at the newly detected finger
-        smoothed_x = None
-        smoothed_y = None
+        smoothed_point = None
 
     # =====================================================
     # STATUS TEXT
@@ -648,6 +523,13 @@ while True:
         2,
         cv2.LINE_AA,
     )
+    
+    (
+        safe_left,
+        safe_right,
+        safe_top,
+        safe_bottom,
+    ) = safe_zone
 
     if show_safe_frame:
         cv2.rectangle(
