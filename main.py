@@ -32,6 +32,8 @@ from gestures import (
     update_palm_history,
     detect_swipe,
     is_open_palm,
+    is_closed_fist,
+    is_valid_page_swipe,
 )
 
 # =========================================================
@@ -46,9 +48,9 @@ SAFE_MARGIN_RATIO = 0.08
 DETECTION_WIDTH = 640
 DETECTION_HEIGHT = 360
 PALM_HISTORY_LENGTH = 8
-SWIPE_COOLDOWN_SECONDS = 0.7
 
-# Number of missing-hand frames before resetting pinch state
+
+# Number of missing-hand frames before resetting gesture state
 PINCH_RESET_FRAMES = 8
 
 # =========================================================
@@ -74,7 +76,11 @@ smoothed_point = None
 
 cursor_point = None
 palm_history = []
-last_swipe_time = 0.0
+
+# Page-swipe state machine. A page swipe is accepted only after
+# the user deliberately performs: closed fist -> open palm -> swipe.
+swipe_state = "WAITING_FOR_FIST"
+active_swipe_hand = None
 
 
 pages = [
@@ -380,6 +386,7 @@ while True:
     )
 
     cursor_point = None
+    detected_hand_label = None
 
     # =====================================================
     # HAND DETECTED
@@ -388,9 +395,15 @@ while True:
     if hand_data is not None:
         hand_missing_frames = 0
         
-        hand, thumb_point, index_point, connections = (
-            hand_data
-        )
+        (
+            hand,
+            thumb_point,
+            index_point,
+            connections,
+            hand_label,
+        ) = hand_data
+
+        detected_hand_label = hand_label
         
         palm_point = get_palm_center(
             hand,
@@ -401,64 +414,147 @@ while True:
         open_palm = is_open_palm(
             hand
         )
+
+        closed_fist = is_closed_fist(
+            hand
+        )
         
         # =================================================
         # SWIPE DETECTION
         # =================================================
 
+        # Page swipes are only active outside drawing/note mode.
         if (
-            open_palm
-            and not drawing_mode
+            not drawing_mode
             and not note_typing
         ):
-            update_palm_history(
-                palm_history,
-                palm_point,
-                PALM_HISTORY_LENGTH,
-            )
-
-            current_time = time.monotonic()
-
-            swipe_direction = detect_swipe(
-                palm_history
-            )
-
-            if swipe_direction is not None:
-
-                if (
-                    current_time - last_swipe_time
-                    >= SWIPE_COOLDOWN_SECONDS
-                ):
-                    print(
-                        "SWIPE",
-                        swipe_direction.upper(),
-                    )
-
-                    if swipe_direction == "left":
-                        current_page_index = min(
-                            current_page_index + 1,
-                            len(pages) - 1,
-                        )
-
-                    elif swipe_direction == "right":
-                        current_page_index = max(
-                            current_page_index - 1,
-                            0,
-                        )
-
-                    print(
-                        "CURRENT PAGE:",
-                        current_page_index + 1,
-                    )
-
-                    last_swipe_time = current_time
-
+            # -------------------------------------------------
+            # STEP 1: WAIT FOR A DELIBERATE CLOSED FIST
+            # -------------------------------------------------
+            if swipe_state == "WAITING_FOR_FIST":
                 palm_history.clear()
 
+                if closed_fist:
+                    active_swipe_hand = hand_label
+                    swipe_state = "WAITING_FOR_OPEN"
+
+                    print(
+                        hand_label.upper(),
+                        "HAND - FIST DETECTED | OPEN PALM",
+                    )
+
+            # -------------------------------------------------
+            # STEP 2: SAME HAND MUST OPEN BEFORE WE ARM
+            # -------------------------------------------------
+            elif swipe_state == "WAITING_FOR_OPEN":
+                palm_history.clear()
+
+                # Switching hands cancels the sequence. The new
+                # hand must start again with its own closed fist.
+                if hand_label != active_swipe_hand:
+                    swipe_state = "WAITING_FOR_FIST"
+                    active_swipe_hand = None
+
+                elif open_palm:
+                    # Important: history is empty at the moment
+                    # the palm opens. Movement used to bring the
+                    # hand into view cannot become a fake swipe.
+                    swipe_state = "ARMED"
+                    palm_history.clear()
+
+                    print(
+                        hand_label.upper(),
+                        "HAND - SWIPE READY",
+                    )
+
+            # -------------------------------------------------
+            # STEP 3: ACCEPT EXACTLY ONE VALID SWIPE
+            # -------------------------------------------------
+            elif swipe_state == "ARMED":
+                # Switching hands while armed cancels the gesture.
+                if hand_label != active_swipe_hand:
+                    palm_history.clear()
+                    swipe_state = "WAITING_FOR_FIST"
+                    active_swipe_hand = None
+
+                # Closing again before swiping restarts the
+                # close -> open preparation using the same hand.
+                elif closed_fist:
+                    palm_history.clear()
+                    swipe_state = "WAITING_FOR_OPEN"
+
+                elif open_palm:
+                    update_palm_history(
+                        palm_history,
+                        palm_point,
+                        PALM_HISTORY_LENGTH,
+                    )
+
+                    swipe_direction = detect_swipe(
+                        palm_history
+                    )
+
+                    if swipe_direction is not None:
+                        valid_page_swipe = (
+                            is_valid_page_swipe(
+                                hand_label,
+                                swipe_direction,
+                            )
+                        )
+
+                        if valid_page_swipe:
+                            print(
+                                hand_label.upper(),
+                                "HAND - SWIPE",
+                                swipe_direction.upper(),
+                            )
+
+                            # Right hand + swipe left = next page.
+                            if (
+                                hand_label == "Right"
+                                and swipe_direction == "left"
+                            ):
+                                current_page_index = min(
+                                    current_page_index + 1,
+                                    len(pages) - 1,
+                                )
+
+                            # Left hand + swipe right = previous page.
+                            elif (
+                                hand_label == "Left"
+                                and swipe_direction == "right"
+                            ):
+                                current_page_index = max(
+                                    current_page_index - 1,
+                                    0,
+                                )
+
+                            print(
+                                "CURRENT PAGE:",
+                                current_page_index + 1,
+                            )
+
+                            # One accepted swipe finishes the cycle.
+                            # Another page action now requires a new
+                            # closed fist -> open palm sequence.
+                            swipe_state = "WAITING_FOR_FIST"
+                            active_swipe_hand = None
+
+                        # Discard the completed movement whether it
+                        # was valid or the wrong direction.
+                        palm_history.clear()
+
+                else:
+                    # A partial/unclear pose should not contribute
+                    # stale coordinates to a later swipe.
+                    palm_history.clear()
+
         else:
+            # Drawing or note mode owns the hand interaction.
             palm_history.clear()
-     
-        
+            swipe_state = "WAITING_FOR_FIST"
+            active_swipe_hand = None
+
         # =================================================
         # SMOOTH CURSOR POSITION
         # =================================================
@@ -578,6 +674,12 @@ while True:
             pinching = False
             pinch_armed = False
 
+            # If the hand has really left the camera, cancel any
+            # half-finished page-swipe sequence. The next gesture
+            # must begin again with a closed fist.
+            swipe_state = "WAITING_FOR_FIST"
+            active_swipe_hand = None
+
         # Reset smoothing so the returning cursor
         # starts directly at the newly detected finger
         smoothed_point = None
@@ -609,6 +711,41 @@ while True:
         cv2.LINE_AA,
     )
     
+    # =====================================================
+    # HAND / SWIPE STATUS
+    # =====================================================
+
+    if detected_hand_label is not None:
+        if swipe_state == "WAITING_FOR_FIST":
+            swipe_state_text = "CLOSE HAND"
+
+        elif swipe_state == "WAITING_FOR_OPEN":
+            swipe_state_text = "OPEN PALM"
+
+        else:
+            if active_swipe_hand == "Right":
+                swipe_state_text = "READY | SWIPE LEFT"
+            elif active_swipe_hand == "Left":
+                swipe_state_text = "READY | SWIPE RIGHT"
+            else:
+                swipe_state_text = "READY"
+
+        hand_status_text = (
+            f"{detected_hand_label.upper()} HAND | "
+            f"{swipe_state_text}"
+        )
+
+        cv2.putText(
+            frame,
+            hand_status_text,
+            (40, frame_height - 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
     (
         safe_left,
         safe_right,

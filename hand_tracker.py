@@ -2,6 +2,7 @@ import mediapipe as mp
 import cv2
 import time
 
+
 def create_hand_landmarker(
     model_path="hand_landmarker.task",
 ):
@@ -24,6 +25,7 @@ def create_hand_landmarker(
 
     return landmarker
 
+
 def detect_hand(
     landmarker,
     frame,
@@ -32,7 +34,7 @@ def detect_hand(
 ):
     frame_height, frame_width = frame.shape[:2]
 
-    # Use a smaller image for faster hand detection
+    # Use a smaller image for faster hand detection.
     detection_frame = cv2.resize(
         frame,
         (
@@ -41,7 +43,7 @@ def detect_hand(
         ),
     )
 
-    # MediaPipe expects RGB instead of OpenCV's BGR
+    # MediaPipe expects RGB instead of OpenCV's BGR.
     rgb_frame = cv2.cvtColor(
         detection_frame,
         cv2.COLOR_BGR2RGB,
@@ -61,11 +63,21 @@ def detect_hand(
         timestamp_ms,
     )
 
-    # No hand detected
+    # No hand detected.
     if not result.hand_landmarks:
         return None
 
     hand = result.hand_landmarks[0]
+
+    # MediaPipe also classifies the detected hand as Left or Right.
+    # Because main.py mirrors the webcam before detection, this label
+    # should match the hand the user sees in the selfie-style preview.
+    hand_label = "Unknown"
+
+    if result.handedness and result.handedness[0]:
+        hand_label = (
+            result.handedness[0][0].category_name
+        )
 
     connections = (
         mp.tasks.vision
@@ -91,7 +103,9 @@ def detect_hand(
         thumb_point,
         index_point,
         connections,
+        hand_label,
     )
+
 
 def draw_hand_skeleton(
     frame,
@@ -102,7 +116,7 @@ def draw_hand_skeleton(
         frame.shape[:2]
     )
 
-    # Draw every landmark
+    # Draw every landmark.
     for index, landmark in enumerate(hand):
         x = int(
             landmark.x * frame_width
@@ -131,7 +145,7 @@ def draw_hand_skeleton(
             cv2.LINE_AA,
         )
 
-    # Draw lines between landmarks
+    # Draw lines between landmarks.
     for connection in connections:
         start_landmark = hand[
             connection.start
@@ -169,6 +183,7 @@ def draw_hand_skeleton(
             2,
             cv2.LINE_AA,
         )
+
 
 def smooth_cursor(
     index_point,
@@ -208,6 +223,7 @@ def smooth_cursor(
         smoothed_x,
         smoothed_y,
     )
+
 
 def get_palm_center(
     hand,
