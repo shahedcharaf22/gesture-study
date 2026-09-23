@@ -40,6 +40,12 @@ from page_view import (
     draw_page,
 )
 
+from toolbar import (
+    create_toolbar_buttons,
+    get_hovered_tool,
+    draw_toolbar,
+)
+
 # =========================================================
 # SETTINGS
 # =========================================================
@@ -71,6 +77,7 @@ highlighter_canvas = None
 previous_point = None
 
 tool = "pen"
+selected_toolbar_tool = "pointer"
 
 show_skeleton = True
 show_safe_frame = True
@@ -101,6 +108,10 @@ transition_start_time = None
 
 transition_from_index = 0
 transition_to_index = 0
+
+swipe_start_x = None
+page_drag_offset = 0
+transition_start_offset = 0
 
 # Count how long MediaPipe has not seen the hand
 hand_missing_frames = 0
@@ -368,6 +379,12 @@ while True:
         frame.shape[:2]
     )
 
+    toolbar_buttons = create_toolbar_buttons(
+        frame_width
+    )
+
+    hovered_toolbar_tool = None
+
     safe_zone = calculate_safe_zone(
         frame,
         SAFE_MARGIN_RATIO,
@@ -434,16 +451,22 @@ while True:
         # SWIPE DETECTION
         # =================================================
 
-        # Page swipes are only active outside drawing/note mode.
+        # Page navigation is available only in POINTER mode.
+        # Drawing tools and note mode own the hand instead.
         if (
-            not drawing_mode
+            selected_toolbar_tool == "pointer"
             and not note_typing
+            and not transition_active
         ):
             # -------------------------------------------------
             # STEP 1: WAIT FOR A DELIBERATE CLOSED FIST
             # -------------------------------------------------
             if swipe_state == "WAITING_FOR_FIST":
                 palm_history.clear()
+
+                # A fresh gesture always starts with the page centered.
+                swipe_start_x = None
+                page_drag_offset = 0
 
                 if closed_fist:
                     active_swipe_hand = hand_label
@@ -465,12 +488,15 @@ while True:
                 if hand_label != active_swipe_hand:
                     swipe_state = "WAITING_FOR_FIST"
                     active_swipe_hand = None
+                    swipe_start_x = None
+                    page_drag_offset = 0
 
                 elif open_palm:
-                    # Important: history is empty at the moment
-                    # the palm opens. Movement used to bring the
-                    # hand into view cannot become a fake swipe.
+                    # The open-palm position becomes the zero point
+                    # for direct page dragging.
                     swipe_state = "ARMED"
+                    swipe_start_x = palm_point[0]
+                    page_drag_offset = 0
                     palm_history.clear()
 
                     print(
@@ -479,7 +505,7 @@ while True:
                     )
 
             # -------------------------------------------------
-            # STEP 3: ACCEPT EXACTLY ONE VALID SWIPE
+            # STEP 3: FOLLOW THE PALM + ACCEPT ONE VALID SWIPE
             # -------------------------------------------------
             elif swipe_state == "ARMED":
                 # Switching hands while armed cancels the gesture.
@@ -487,14 +513,53 @@ while True:
                     palm_history.clear()
                     swipe_state = "WAITING_FOR_FIST"
                     active_swipe_hand = None
+                    swipe_start_x = None
+                    page_drag_offset = 0
 
                 # Closing again before swiping restarts the
                 # close -> open preparation using the same hand.
                 elif closed_fist:
                     palm_history.clear()
                     swipe_state = "WAITING_FOR_OPEN"
+                    swipe_start_x = None
+                    page_drag_offset = 0
 
                 elif open_palm:
+                    if swipe_start_x is None:
+                        swipe_start_x = palm_point[0]
+
+                    # Measure horizontal palm movement from the
+                    # position where the palm first opened.
+                    raw_drag_offset = (
+                        palm_point[0]
+                        - swipe_start_x
+                    )
+
+                    # Limit direct dragging to 45% of the window.
+                    max_drag = int(
+                        frame_width * 0.45
+                    )
+
+                    # Right hand is allowed to push only left.
+                    if hand_label == "Right":
+                        page_drag_offset = max(
+                            -max_drag,
+                            min(
+                                0,
+                                raw_drag_offset,
+                            ),
+                        )
+
+                    # Left hand is allowed to push only right.
+                    elif hand_label == "Left":
+                        page_drag_offset = min(
+                            max_drag,
+                            max(
+                                0,
+                                raw_drag_offset,
+                            ),
+                        )
+
                     update_palm_history(
                         palm_history,
                         palm_point,
@@ -520,14 +585,11 @@ while True:
                                 swipe_direction.upper(),
                             )
 
-                            # Start by assuming we stay on
-                            # the current page.
                             target_page_index = (
                                 current_page_index
                             )
 
-                            # Right hand + swipe left
-                            # = next page.
+                            # Right hand + swipe left = next page.
                             if (
                                 hand_label == "Right"
                                 and swipe_direction == "left"
@@ -537,8 +599,7 @@ while True:
                                     len(pages) - 1,
                                 )
 
-                            # Left hand + swipe right
-                            # = previous page.
+                            # Left hand + swipe right = previous page.
                             elif (
                                 hand_label == "Left"
                                 and swipe_direction == "right"
@@ -548,13 +609,18 @@ while True:
                                     0,
                                 )
 
-                            # Only start a transition if
-                            # there is another page to show.
+                            # Only start a transition if there is
+                            # another page in that direction.
                             if (
                                 target_page_index
                                 != current_page_index
-                                and not transition_active
                             ):
+                                # Save the exact live-drag position so
+                                # the animation continues from there.
+                                transition_start_offset = (
+                                    page_drag_offset
+                                )
+
                                 transition_active = True
                                 transition_direction = (
                                     swipe_direction
@@ -576,11 +642,15 @@ while True:
                                     transition_to_index + 1,
                                 )
 
+                            else:
+                                # No page exists beyond this boundary.
+                                page_drag_offset = 0
+                                transition_start_offset = 0
+
                             # One accepted swipe finishes the cycle.
-                            # Another page action now requires a new
-                            # closed fist -> open palm sequence.
                             swipe_state = "WAITING_FOR_FIST"
                             active_swipe_hand = None
+                            swipe_start_x = None
 
                         # Discard the completed movement whether it
                         # was valid or the wrong direction.
@@ -592,10 +662,15 @@ while True:
                     palm_history.clear()
 
         else:
-            # Drawing or note mode owns the hand interaction.
+            # Drawing, note mode, or an active page transition owns
+            # the interaction, so cancel any half-finished swipe.
             palm_history.clear()
             swipe_state = "WAITING_FOR_FIST"
             active_swipe_hand = None
+            swipe_start_x = None
+
+            if not transition_active:
+                page_drag_offset = 0
 
         # =================================================
         # SMOOTH CURSOR POSITION
@@ -609,6 +684,12 @@ while True:
 
         cursor_point = smoothed_point
 
+        hovered_toolbar_tool = (
+            get_hovered_tool(
+                cursor_point,
+                toolbar_buttons,
+            )
+        )
 
         # =================================================
         # SAFE ZONE CHECK
@@ -634,15 +715,40 @@ while True:
             )
         )
 
-        if new_pinch:
-            drawing_mode = not drawing_mode
+        # Pinch no longer toggles drawing globally.
+        # It now means: select the toolbar item I am pointing at.
+        page_gesture_active = (
+            swipe_state in (
+                "WAITING_FOR_OPEN",
+                "ARMED",
+            )
+            or transition_active
+        )
+
+        if (
+            new_pinch
+            and not page_gesture_active
+            and not note_typing
+            and hovered_toolbar_tool
+            is not None
+        ):
+            selected_toolbar_tool = (
+                hovered_toolbar_tool
+            )
+
             previous_point = None
 
-            if drawing_mode:
-                print("Drawing mode ON")
+            if selected_toolbar_tool == "pointer":
+                drawing_mode = False
 
             else:
-                print("Drawing mode OFF")
+                tool = selected_toolbar_tool
+                drawing_mode = True
+
+            print(
+                "TOOL SELECTED:",
+                selected_toolbar_tool.upper(),
+            )
 
         # =================================================
         # DRAWING
@@ -653,6 +759,7 @@ while True:
             and not pinching
             and not note_typing
             and inside_safe_zone
+            and hovered_toolbar_tool is None
         ):
             current_point = (
                 cursor_point
@@ -691,11 +798,25 @@ while True:
         # CURSOR
         # =================================================
 
-        draw_cursor(
-            frame,
-            cursor_point,
-            tool,
-        )
+        if (
+            selected_toolbar_tool
+            == "pointer"
+        ):
+            cv2.circle(
+                frame,
+                cursor_point,
+                8,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        else:
+            draw_cursor(
+                frame,
+                cursor_point,
+                tool,
+            )
 
     # =====================================================
     # NO HAND
@@ -721,6 +842,10 @@ while True:
             # must begin again with a closed fist.
             swipe_state = "WAITING_FOR_FIST"
             active_swipe_hand = None
+            swipe_start_x = None
+
+            if not transition_active:
+                page_drag_offset = 0
 
         # Reset smoothing so the returning cursor
         # starts directly at the newly detected finger
@@ -730,7 +855,10 @@ while True:
     # STATUS TEXT
     # =====================================================
 
-    if drawing_mode:
+    if selected_toolbar_tool == "pointer":
+        status_text = "MODE: POINTER"
+
+    elif drawing_mode:
         status_text = (
             f"DRAW ON | "
             f"{tool.upper()}"
@@ -738,7 +866,7 @@ while True:
 
     else:
         status_text = (
-            f"DRAW OFF | "
+            f"DRAW PAUSED | "
             f"{tool.upper()}"
         )
 
@@ -830,20 +958,18 @@ while True:
     # =====================================================
 
     if transition_active:
-        # How long has the animation been running?
         elapsed_time = (
             time.monotonic()
             - transition_start_time
         )
 
-        # Convert elapsed time to progress from
-        # 0.0 (start) to 1.0 (finished).
         progress = min(
             elapsed_time
             / PAGE_TRANSITION_DURATION,
             1.0,
         )
-        
+
+        # Ease-out movement.
         eased_progress = (
             1
             - (1 - progress) ** 3
@@ -853,16 +979,24 @@ while True:
         # SWIPING LEFT
         # ---------------------------------------------
         if transition_direction == "left":
-            # Old page moves off-screen to the left.
+            # Continue from the exact position reached
+            # by the user's palm.
             old_page_offset = int(
-                -frame_width
+                transition_start_offset
+                + (
+                    -frame_width
+                    - transition_start_offset
+                )
                 * eased_progress
             )
 
-            # New page starts on the right and
-            # moves toward the center.
-            new_page_offset = int(
+            new_page_start_offset = (
                 frame_width
+                + transition_start_offset
+            )
+
+            new_page_offset = int(
+                new_page_start_offset
                 * (1.0 - eased_progress)
             )
 
@@ -870,20 +1004,25 @@ while True:
         # SWIPING RIGHT
         # ---------------------------------------------
         else:
-            # Old page moves off-screen to the right.
             old_page_offset = int(
-                frame_width
+                transition_start_offset
+                + (
+                    frame_width
+                    - transition_start_offset
+                )
                 * eased_progress
             )
 
-            # New page starts on the left and
-            # moves toward the center.
-            new_page_offset = int(
+            new_page_start_offset = (
                 -frame_width
+                + transition_start_offset
+            )
+
+            new_page_offset = int(
+                new_page_start_offset
                 * (1.0 - eased_progress)
             )
 
-        # Draw the page that is leaving.
         draw_page(
             display_frame,
             pages[
@@ -892,7 +1031,6 @@ while True:
             old_page_offset,
         )
 
-        # Draw the page that is entering.
         draw_page(
             display_frame,
             pages[
@@ -901,7 +1039,6 @@ while True:
             new_page_offset,
         )
 
-        # Finish the transition once progress reaches 1.0.
         if progress >= 1.0:
             current_page_index = (
                 transition_to_index
@@ -910,20 +1047,24 @@ while True:
             transition_active = False
             transition_direction = None
             transition_start_time = None
+            transition_start_offset = 0
+            page_drag_offset = 0
+            swipe_start_x = None
 
             print(
                 "CURRENT PAGE:",
                 current_page_index + 1,
             )
 
-    # No animation is active, so draw only
-    # the current page in the center.
+    # No finishing animation is active. While ARMED,
+    # page_drag_offset makes the page follow the palm.
     else:
         draw_page(
             display_frame,
             pages[
                 current_page_index
             ],
+            page_drag_offset,
         )
 
     # =====================================================
@@ -1011,6 +1152,17 @@ while True:
             2,
             cv2.LINE_AA,
         )
+
+    # =====================================================
+    # AIR TOOLBAR
+    # =====================================================
+
+    draw_toolbar(
+        display_frame,
+        toolbar_buttons,
+        selected_toolbar_tool,
+        hovered_toolbar_tool,
+    )
 
     # =====================================================
     # SHOW WINDOW
@@ -1126,30 +1278,43 @@ while True:
     if key == ord("q"):
         break
 
-    # Pen
-    elif key == ord("p"):
-        tool = "pen"
+    # Pointer - temporary keyboard fallback
+    elif key == ord("o"):
+        selected_toolbar_tool = "pointer"
+        drawing_mode = False
+        previous_point = None
 
+        print(
+            "Pointer selected"
+        )
+
+    # Pen - temporary keyboard fallback
+    elif key == ord("p"):
+        selected_toolbar_tool = "pen"
+        tool = "pen"
+        drawing_mode = True
         previous_point = None
 
         print(
             "Pen selected"
         )
 
-    # Eraser
+    # Eraser - temporary keyboard fallback
     elif key == ord("e"):
+        selected_toolbar_tool = "eraser"
         tool = "eraser"
-
+        drawing_mode = True
         previous_point = None
 
         print(
             "Eraser selected"
         )
 
-    # Highlighter
+    # Highlighter - temporary keyboard fallback
     elif key == ord("h"):
+        selected_toolbar_tool = "highlighter"
         tool = "highlighter"
-
+        drawing_mode = True
         previous_point = None
 
         print(
