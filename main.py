@@ -36,6 +36,10 @@ from gestures import (
     is_valid_page_swipe,
 )
 
+from page_view import (
+    draw_page,
+)
+
 # =========================================================
 # SETTINGS
 # =========================================================
@@ -48,7 +52,7 @@ SAFE_MARGIN_RATIO = 0.08
 DETECTION_WIDTH = 640
 DETECTION_HEIGHT = 360
 PALM_HISTORY_LENGTH = 8
-
+PAGE_TRANSITION_DURATION = 0.35
 
 # Number of missing-hand frames before resetting gesture state
 PINCH_RESET_FRAMES = 8
@@ -90,6 +94,13 @@ pages = [
 ]
 
 current_page_index = 0
+
+transition_active = False
+transition_direction = None
+transition_start_time = None
+
+transition_from_index = 0
+transition_to_index = 0
 
 # Count how long MediaPipe has not seen the hand
 hand_missing_frames = 0
@@ -509,30 +520,61 @@ while True:
                                 swipe_direction.upper(),
                             )
 
-                            # Right hand + swipe left = next page.
+                            # Start by assuming we stay on
+                            # the current page.
+                            target_page_index = (
+                                current_page_index
+                            )
+
+                            # Right hand + swipe left
+                            # = next page.
                             if (
                                 hand_label == "Right"
                                 and swipe_direction == "left"
                             ):
-                                current_page_index = min(
+                                target_page_index = min(
                                     current_page_index + 1,
                                     len(pages) - 1,
                                 )
 
-                            # Left hand + swipe right = previous page.
+                            # Left hand + swipe right
+                            # = previous page.
                             elif (
                                 hand_label == "Left"
                                 and swipe_direction == "right"
                             ):
-                                current_page_index = max(
+                                target_page_index = max(
                                     current_page_index - 1,
                                     0,
                                 )
 
-                            print(
-                                "CURRENT PAGE:",
-                                current_page_index + 1,
-                            )
+                            # Only start a transition if
+                            # there is another page to show.
+                            if (
+                                target_page_index
+                                != current_page_index
+                                and not transition_active
+                            ):
+                                transition_active = True
+                                transition_direction = (
+                                    swipe_direction
+                                )
+                                transition_start_time = (
+                                    time.monotonic()
+                                )
+                                transition_from_index = (
+                                    current_page_index
+                                )
+                                transition_to_index = (
+                                    target_page_index
+                                )
+
+                                print(
+                                    "PAGE TRANSITION:",
+                                    transition_from_index + 1,
+                                    "->",
+                                    transition_to_index + 1,
+                                )
 
                             # One accepted swipe finishes the cycle.
                             # Another page action now requires a new
@@ -784,26 +826,105 @@ while True:
     )
     
     # =====================================================
-    # CURRENT PAGE
+    # CURRENT PAGE / PAGE TRANSITION
     # =====================================================
 
-    page_text = pages[
-        current_page_index
-    ]
+    if transition_active:
+        # How long has the animation been running?
+        elapsed_time = (
+            time.monotonic()
+            - transition_start_time
+        )
 
-    cv2.putText(
-        display_frame,
-        page_text,
-        (
-            frame_width - 180,
-            45,
-        ),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
+        # Convert elapsed time to progress from
+        # 0.0 (start) to 1.0 (finished).
+        progress = min(
+            elapsed_time
+            / PAGE_TRANSITION_DURATION,
+            1.0,
+        )
+        
+        eased_progress = (
+            1
+            - (1 - progress) ** 3
+        )
+
+        # ---------------------------------------------
+        # SWIPING LEFT
+        # ---------------------------------------------
+        if transition_direction == "left":
+            # Old page moves off-screen to the left.
+            old_page_offset = int(
+                -frame_width
+                * eased_progress
+            )
+
+            # New page starts on the right and
+            # moves toward the center.
+            new_page_offset = int(
+                frame_width
+                * (1.0 - eased_progress)
+            )
+
+        # ---------------------------------------------
+        # SWIPING RIGHT
+        # ---------------------------------------------
+        else:
+            # Old page moves off-screen to the right.
+            old_page_offset = int(
+                frame_width
+                * eased_progress
+            )
+
+            # New page starts on the left and
+            # moves toward the center.
+            new_page_offset = int(
+                -frame_width
+                * (1.0 - eased_progress)
+            )
+
+        # Draw the page that is leaving.
+        draw_page(
+            display_frame,
+            pages[
+                transition_from_index
+            ],
+            old_page_offset,
+        )
+
+        # Draw the page that is entering.
+        draw_page(
+            display_frame,
+            pages[
+                transition_to_index
+            ],
+            new_page_offset,
+        )
+
+        # Finish the transition once progress reaches 1.0.
+        if progress >= 1.0:
+            current_page_index = (
+                transition_to_index
+            )
+
+            transition_active = False
+            transition_direction = None
+            transition_start_time = None
+
+            print(
+                "CURRENT PAGE:",
+                current_page_index + 1,
+            )
+
+    # No animation is active, so draw only
+    # the current page in the center.
+    else:
+        draw_page(
+            display_frame,
+            pages[
+                current_page_index
+            ],
+        )
 
     # =====================================================
     # DRAW STICKY NOTES
